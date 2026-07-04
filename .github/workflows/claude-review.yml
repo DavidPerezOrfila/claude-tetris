@@ -1,0 +1,33 @@
+name: PR Welcome & Stats
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  welcome:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post welcome comment with PR stats
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            }
+            );
+
+            const stats = `\n📁 Files changed: ${pr.changed_files}\n➕ Additions: ${pr.additions}\n➖ Deletions: ${pr.deletions}`;
+            const body = `🤖 **Welcome to your Pull Request!**\n\nThanks for contributing. Here is a quick overview of your changes:\n${stats}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
