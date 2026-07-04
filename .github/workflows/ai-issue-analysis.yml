@@ -46,20 +46,28 @@ jobs:
               headers['Authorization'] = `Bearer ${apiKey}`;
             }
 
-            const response = await fetch(`${baseUrl}/chat/completions`, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({
-                model: model,
-                messages: [{ role: 'user', content: prompt }],
-                max_tokens: 2048,
-              }),
-            });
+            let response;
+            for (let attempt = 0; attempt < 4; attempt++) {
+              response = await fetch(`${baseUrl}/chat/completions`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  model: model,
+                  messages: [{ role: 'user', content: prompt }],
+                  max_tokens: 2048,
+                }),
+              });
 
-            if (!response.ok) {
-              const text = await response.text();
-              core.setFailed(`LLM API error: ${response.status} ${text}`);
-              return;
+              if (response.ok) break;
+              if (response.status !== 429 || attempt === 3) {
+                const text = await response.text();
+                core.setFailed(`LLM API error: ${response.status} ${text}`);
+                return;
+              }
+              // ponytail: exponential backoff for 429 rate limits
+              const delay = Math.pow(2, attempt) * 5000;
+              console.log(`Rate limited (429), retrying in ${delay/1000}s...`);
+              await new Promise(r => setTimeout(r, delay));
             }
 
             const data = await response.json();
