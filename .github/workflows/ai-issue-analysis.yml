@@ -10,6 +10,7 @@ permissions:
 jobs:
   analyze:
     runs-on: ubuntu-latest
+    environment: Tests
     steps:
       - name: Analyze issue with LLM
         uses: actions/github-script@v7
