@@ -11,13 +11,17 @@ jobs:
   analyze:
     runs-on: ubuntu-latest
     environment: Tests
+    env:
+      LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_MODEL: ${{ vars.LLM_MODEL }}
     steps:
+      - name: Debug env
+        run: |
+          echo "LLM_MODEL=${{ vars.LLM_MODEL }}"
+          echo "LLM_BASE_URL length=${{ secrets.LLM_BASE_URL != '' && '✓ set' || '✗ empty' }}"
       - name: Analyze issue with LLM
         uses: actions/github-script@v7
-        env:
-          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_MODEL: ${{ vars.LLM_MODEL }}
         with:
           script: |
             const issue = context.payload.issue;
