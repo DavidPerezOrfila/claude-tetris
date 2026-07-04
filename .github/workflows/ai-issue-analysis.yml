@@ -1,0 +1,125 @@
+name: AI Issue Analysis
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Analyze issue with LLM
+        uses: actions/github-script@v7
+        env:
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+        with:
+          script: |
+            const issue = context.payload.issue;
+
+            const baseUrl = process.env.LLM_BASE_URL;
+            const apiKey = process.env.LLM_API_KEY;
+            const model = process.env.LLM_MODEL;
+
+            if (!baseUrl || !model) {
+              core.setFailed('Faltan variables requeridas: LLM_BASE_URL y/o LLM_MODEL.');
+              return;
+            }
+
+            // Fetch existing labels
+            const { data: labels } = await github.rest.issues.listLabelsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const labelNames = new Set(labels.map(l => l.name));
+
+            const prompt = `Analiza el siguiente issue de GitHub y responde ÚNICAMENTE con un JSON válido.\n\nTítulo: ${issue.title}\nCuerpo: ${issue.body || "Sin descripción"}\n\nFormato requerido (no incluyas markdown, solo JSON):\n{\n  "labels": ["label1", "label2"],\n  "diagnosis": "Análisis detallado del problema y sugerencias de solución en español. Sé conciso pero completo."\n}\n\nReglas:\n- labels debe contener entre 1 y 3 elementos.\n- Usa labels descriptivos del tipo de issue (ej: bug, feature, enhancement, refactor, documentation, question, ui, gameplay, performance).\n- El JSON debe ser válido y no contener comentarios.`;
+
+            const headers = {
+              'Content-Type': 'application/json',
+            };
+            if (apiKey) {
+              headers['Authorization'] = `Bearer ${apiKey}`;
+            }
+
+            const response = await fetch(`${baseUrl}/chat/completions`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                model: model,
+                messages: [{ role: 'user', content: prompt }],
+                max_tokens: 2048,
+              }),
+            });
+
+            if (!response.ok) {
+              const text = await response.text();
+              core.setFailed(`LLM API error: ${response.status} ${text}`);
+              return;
+            }
+
+            const data = await response.json();
+            const text = data.choices?.[0]?.message?.content;
+            if (!text) {
+              core.setFailed('LLM API returned empty content.');
+              return;
+            }
+
+            let result;
+            try {
+              result = JSON.parse(text);
+            } catch (e) {
+              // Try to extract JSON from response
+              const match = text.match(/\{[\s\S]*?\}/);
+              if (match) {
+                result = JSON.parse(match[0]);
+              } else {
+                throw new Error('No se pudo parsear la respuesta del LLM: ' + text);
+              }
+            }
+
+            // Validate labels
+            const labelsToApply = Array.isArray(result.labels) ? result.labels : [];
+
+            // Create missing labels
+            for (const label of labelsToApply) {
+              if (typeof label !== 'string') continue;
+              if (!labelNames.has(label)) {
+                try {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name: label,
+                    color: 'ededed',
+                  });
+                  labelNames.add(label);
+                } catch (e) {
+                  console.log(`Could not create label ${label}: ${e.message}`);
+                }
+              }
+            }
+
+            // Add labels to issue
+            if (labelsToApply.length > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: labelsToApply,
+              });
+            }
+
+            // Post diagnosis comment
+            if (result.diagnosis) {
+              const body = `## 🤖 Diagnóstico de IA\n\n${result.diagnosis}`;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body,
+              });
+            }
