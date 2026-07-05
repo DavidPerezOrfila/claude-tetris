@@ -23,17 +23,24 @@ jobs:
 
             const baseUrl = process.env.LLM_BASE_URL;
             const apiKey = process.env.LLM_API_KEY;
-            const model  = process.env.LLM_MODEL;
+            let   model  = process.env.LLM_MODEL;
 
             if (!baseUrl || !model) {
               core.setFailed(
                 'Variables requeridas no encontradas. ' +
                 'LLM_BASE_URL=' + (baseUrl ? 'SET' : 'EMPTY') + ', ' +
                 'LLM_MODEL=' + (model ? 'SET' : 'EMPTY') + '. ' +
-                'Configúralas en Settings > Secrets and variables > Actions (repositorio).'
+                'Configuralas en Settings > Secrets and variables > Actions (repositorio).'
               );
               return;
             }
+
+            // Strip LiteLLM-style provider prefixes (e.g. nvidia_nim/)
+            // The NVIDIA NIM API expects just the model id (e.g. moonshotai/kimi-k2.6)
+            model = model.replace(/^nvidia_nim\//, '');
+
+            core.info('LLM endpoint: ' + baseUrl + '/chat/completions');
+            core.info('LLM model:    ' + model);
 
             // Fetch existing repo labels
             const { data: repoLabels } = await github.rest.issues.listLabelsForRepo({
