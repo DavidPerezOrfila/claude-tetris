@@ -52,16 +52,27 @@ jobs:
             const headers = { 'Content-Type': 'application/json' };
             if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
 
+            // Wrapper: fetch with explicit timeout (Node 20's undici has a tight default headersTimeout)
+            async function fetchWithTimeout(url, opts, timeoutMs) {
+              const controller = new AbortController();
+              const id = setTimeout(() => controller.abort(), timeoutMs);
+              try {
+                return await fetch(url, { ...opts, signal: controller.signal });
+              } finally {
+                clearTimeout(id);
+              }
+            }
+
             // Helper: call LLM with retry
             async function callLLM(prompt, maxTokens) {
               for (let attempt = 0; attempt < 4; attempt++) {
-                const resp = await fetch(baseUrl + '/chat/completions', {
+                const resp = await fetchWithTimeout(baseUrl + '/chat/completions', {
                   method: 'POST',
                   headers,
                   body: JSON.stringify({
                     model, messages: [{ role: 'user', content: prompt }], max_tokens: maxTokens,
                   }),
-                });
+                }, 180000);
                 if (resp.ok) return resp;
                 if (resp.status !== 429 || attempt === 3) return resp;
                 await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 5000));
@@ -198,7 +209,7 @@ jobs:
 
             let implResponse;
             for (let attempt = 0; attempt < 4; attempt++) {
-              implResponse = await fetch(baseUrl + '/chat/completions', {
+              implResponse = await fetchWithTimeout(baseUrl + '/chat/completions', {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({
@@ -206,7 +217,7 @@ jobs:
                   messages: [{ role: 'user', content: implPrompt }],
                   max_tokens: 8192,
                 }),
-              });
+              }, 180000);
 
               if (implResponse.ok) break;
 
