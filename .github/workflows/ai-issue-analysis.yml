@@ -26,6 +26,7 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            const core = require('@actions/core');
             const issue = context.payload.issue;
 
             const baseUrl = process.env.LLM_BASE_URL;
@@ -268,7 +269,7 @@ jobs:
                   content: content,
                   encoding: 'utf-8',
                 });
-                return { path, sha: data.sha, mode: '100644' };
+                return { path, sha: data.sha, mode: '100644', type: 'blob' };
               })
             );
 
