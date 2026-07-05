@@ -11,14 +11,10 @@ jobs:
   analyze:
     runs-on: ubuntu-latest
     steps:
-      - name: Debug LLM config
-        run: |
-          echo "LLM_MODEL is ${{ vars.LLM_MODEL != '' && 'SET' || 'EMPTY' }}"
-          echo "LLM_BASE_URL is ${{ secrets.LLM_BASE_URL != '' && 'SET' || 'EMPTY' }}"
       - name: Analyze issue with LLM
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
-          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
         with:
@@ -27,42 +23,53 @@ jobs:
 
             const baseUrl = process.env.LLM_BASE_URL;
             const apiKey = process.env.LLM_API_KEY;
-            const model = process.env.LLM_MODEL;
+            const model  = process.env.LLM_MODEL;
 
             if (!baseUrl || !model) {
-              core.setFailed('Variables requeridas no encontradas. LLM_BASE_URL=' + typeof baseUrl + ' LLM_MODEL=' + typeof model);
+              core.setFailed(
+                'Variables requeridas no encontradas. ' +
+                'LLM_BASE_URL=' + (baseUrl ? 'SET' : 'EMPTY') + ', ' +
+                'LLM_MODEL=' + (model ? 'SET' : 'EMPTY') + '. ' +
+                'Configúralas en Settings > Secrets and variables > Actions (repositorio).'
+              );
               return;
             }
 
-            // Fetch existing labels
-            const { data: labels } = await github.rest.issues.listLabelsForRepo({
+            // Fetch existing repo labels
+            const { data: repoLabels } = await github.rest.issues.listLabelsForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
             });
-            const labelNames = new Set(labels.map(l => l.name));
+            const labelNames = new Set(repoLabels.map(l => l.name));
 
-            const prompt = `Analiza el siguiente issue de GitHub y responde ÚNICAMENTE con un JSON válido.
+            // Build prompt — using array join to avoid YAML-breaking braces
+            const promptLines = [
+              'Analiza el siguiente issue de GitHub y responde UNICAMENTE con un JSON valido.',
+              '',
+              'Titulo: ' + issue.title,
+              'Cuerpo: ' + (issue.body || 'Sin descripcion'),
+              '',
+              'Formato requerido (no incluyas markdown, solo JSON puro):',
+              '{"labels": ["label1", "label2"], "diagnosis": "Analisis detallado..."}',
+              '',
+              'Reglas:',
+              '- labels debe contener entre 1 y 3 elementos.',
+              '- Usa labels descriptivos (ej: bug, feature, enhancement, refactor, documentation, question, ui, gameplay, performance).',
+              '- diagnosis debe ser un analisis conciso pero completo en espanol.',
+              '- El JSON debe ser valido y no contener comentarios.',
+            ];
+            const prompt = promptLines.join('\n');
 
-Título: ${issue.title}
-Cuerpo: ${issue.body || "Sin descripción"}
-
-Formato requerido (no incluyas markdown, solo JSON):
-{
-  "labels": ["label1", "label2"],
-  "diagnosis": "Análisis detallado del problema y sugerencias de solución en español. Sé conciso pero completo."
-}
-
-Reglas:
-- labels debe contener entre 1 y 3 elementos.
-- Usa labels descriptivos del tipo de issue (ej: bug, feature, enhancement, refactor, documentation, question, ui, gameplay, performance).
-- El JSON debe ser válido y no contener comentarios.`;
-
+            // Prepare headers
             const headers = { 'Content-Type': 'application/json' };
-            if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+            if (apiKey) {
+              headers['Authorization'] = 'Bearer ' + apiKey;
+            }
 
+            // Call LLM with retry for rate limits (429)
             let response;
             for (let attempt = 0; attempt < 4; attempt++) {
-              response = await fetch(`${baseUrl}/chat/completions`, {
+              response = await fetch(baseUrl + '/chat/completions', {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({
@@ -71,41 +78,48 @@ Reglas:
                   max_tokens: 2048,
                 }),
               });
+
               if (response.ok) break;
+
               if (response.status !== 429 || attempt === 3) {
-                const text = await response.text();
-                core.setFailed(`LLM API error: ${response.status} ${text}`);
+                const errText = await response.text();
+                core.setFailed('LLM API error: ' + response.status + ' ' + errText);
                 return;
               }
-              // ponytail: exponential backoff for 429 rate limits
+
+              // Exponential backoff for 429 rate limits
               const delay = Math.pow(2, attempt) * 5000;
-              console.log(`Rate limited (429), retrying in ${delay/1000}s...`);
+              core.info('Rate limited (429), retrying in ' + (delay / 1000) + 's...');
               await new Promise(r => setTimeout(r, delay));
             }
 
             const data = await response.json();
-            const text = data.choices?.[0]?.message?.content;
-            if (!text) {
+            const rawText = data.choices?.[0]?.message?.content;
+            if (!rawText) {
               core.setFailed('LLM API returned empty content.');
               return;
             }
 
+            // Parse LLM response — try direct parse, then extract JSON object
             let result;
             try {
-              result = JSON.parse(text);
+              result = JSON.parse(rawText);
             } catch (e) {
-              const match = text.match(/\{[\s\S]*?\}/);
+              const match = rawText.match(/\{[\s\S]*\}/);
               if (match) {
                 result = JSON.parse(match[0]);
               } else {
-                throw new Error('No se pudo parsear la respuesta del LLM: ' + text);
+                core.setFailed('No se pudo parsear la respuesta del LLM: ' + rawText);
+                return;
               }
             }
 
-            const labelsToApply = Array.isArray(result.labels) ? result.labels : [];
+            const labelsToApply = Array.isArray(result.labels)
+              ? result.labels.filter(l => typeof l === 'string')
+              : [];
 
+            // Create labels that don't exist yet
             for (const label of labelsToApply) {
-              if (typeof label !== 'string') continue;
               if (!labelNames.has(label)) {
                 try {
                   await github.rest.issues.createLabel({
@@ -116,11 +130,12 @@ Reglas:
                   });
                   labelNames.add(label);
                 } catch (e) {
-                  console.log(`Could not create label ${label}: ${e.message}`);
+                  core.warning('Could not create label ' + label + ': ' + e.message);
                 }
               }
             }
 
+            // Apply labels
             if (labelsToApply.length > 0) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
@@ -130,12 +145,12 @@ Reglas:
               });
             }
 
+            // Post diagnosis comment
             if (result.diagnosis) {
-              const body = `## 🤖 Diagnóstico de IA\n\n${result.diagnosis}`;
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issue.number,
-                body,
+                body: '## \u{1F916} Diagnóstico de IA\n\n' + result.diagnosis,
               });
             }
