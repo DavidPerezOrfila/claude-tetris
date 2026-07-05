@@ -5,13 +5,17 @@ on:
     types: [opened, edited]
 
 permissions:
+  contents: write
+  pull-requests: write
   issues: write
 
 jobs:
-  analyze:
+  analyze-and-implement:
     runs-on: ubuntu-latest
     steps:
-      - name: Analyze issue with LLM
+      - uses: actions/checkout@v4
+
+      - name: Analyze and implement issue
         uses: actions/github-script@v8
         env:
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
@@ -19,6 +23,7 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL }}
         with:
           script: |
+            const fs = require('fs');
             const issue = context.payload.issue;
 
             const baseUrl = process.env.LLM_BASE_URL;
@@ -36,11 +41,12 @@ jobs:
             }
 
             // Strip LiteLLM-style provider prefixes (e.g. nvidia_nim/)
-            // The NVIDIA NIM API expects just the model id (e.g. moonshotai/kimi-k2.6)
             model = model.replace(/^nvidia_nim\//, '');
 
             core.info('LLM endpoint: ' + baseUrl + '/chat/completions');
             core.info('LLM model:    ' + model);
+
+            // === ANALYSIS PHASE ===
 
             // Fetch existing repo labels
             const { data: repoLabels } = await github.rest.issues.listLabelsForRepo({
@@ -49,7 +55,6 @@ jobs:
             });
             const labelNames = new Set(repoLabels.map(l => l.name));
 
-            // Build prompt — using array join to avoid YAML-breaking braces
             const promptLines = [
               'Analiza el siguiente issue de GitHub y responde UNICAMENTE con un JSON valido.',
               '',
@@ -67,13 +72,12 @@ jobs:
             ];
             const prompt = promptLines.join('\n');
 
-            // Prepare headers
             const headers = { 'Content-Type': 'application/json' };
             if (apiKey) {
               headers['Authorization'] = 'Bearer ' + apiKey;
             }
 
-            // Call LLM with retry for rate limits (429)
+            // Call LLM
             let response;
             for (let attempt = 0; attempt < 4; attempt++) {
               response = await fetch(baseUrl + '/chat/completions', {
@@ -94,7 +98,6 @@ jobs:
                 return;
               }
 
-              // Exponential backoff for 429 rate limits
               const delay = Math.pow(2, attempt) * 5000;
               core.info('Rate limited (429), retrying in ' + (delay / 1000) + 's...');
               await new Promise(r => setTimeout(r, delay));
@@ -107,7 +110,6 @@ jobs:
               return;
             }
 
-            // Parse LLM response — try direct parse, then extract JSON object
             let result;
             try {
               result = JSON.parse(rawText);
@@ -125,7 +127,6 @@ jobs:
               ? result.labels.filter(l => typeof l === 'string')
               : [];
 
-            // Create labels that don't exist yet
             for (const label of labelsToApply) {
               if (!labelNames.has(label)) {
                 try {
@@ -142,7 +143,6 @@ jobs:
               }
             }
 
-            // Apply labels
             if (labelsToApply.length > 0) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
@@ -152,7 +152,6 @@ jobs:
               });
             }
 
-            // Post diagnosis comment
             if (result.diagnosis) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
@@ -161,3 +160,200 @@ jobs:
                 body: '## \u{1F916} Diagnóstico de IA\n\n' + result.diagnosis,
               });
             }
+
+            // === IMPLEMENTATION PHASE (only on opened, not edited) ===
+            if (context.payload.action !== 'opened') {
+              core.info('Skipping implementation for ' + context.payload.action + ' event');
+              return;
+            }
+
+            // Read current source files for context
+            const sourceFiles = {};
+            const fileList = ['index.html', 'style.css', 'game.js', 'CLAUDE.md'];
+            for (const f of fileList) {
+              try {
+                sourceFiles[f] = fs.readFileSync(f, 'utf-8');
+              } catch (e) {
+                core.warning('Could not read ' + f + ': ' + e.message);
+              }
+            }
+
+            const implPrompt = [
+              'Eres un desarrollador senior implementando un issue de GitHub.',
+              'El proyecto es Tetris en JavaScript vanilla, HTML5 Canvas y CSS.',
+              '',
+              'Issue #' + issue.number + ': ' + issue.title,
+              '',
+              issue.body || 'Sin descripcion',
+              '',
+              '=== Codigo fuente actual ===',
+              '',
+              ...Object.entries(sourceFiles).map(([name, content]) =>
+                '<file path="' + name + '">\n' + content + '\n</file>'
+              ),
+              '',
+              '=== Instrucciones ===',
+              'Responde UNICAMENTE con un JSON valido con este formato:',
+              JSON.stringify({
+                files: {
+                  'ruta/archivo': 'contenido COMPLETO del archivo modificado'
+                },
+                pr_title: 'feat: descripcion corta',
+                pr_body: 'Closes #' + issue.number + '\\n\\nDescripcion detallada...'
+              }, null, 2),
+              '',
+              'Reglas:',
+              '- Incluye SOLO los archivos que necesiten cambios, con su contenido COMPLETO.',
+              '- Manten el estilo y convenciones del codigo existente.',
+              '- Sin dependencias externas, sin frameworks, sin build process.',
+              '- Si el issue es muy ambiguo o no implementable, responde: {"impossible": true, "reason": "..."}',
+              '- El JSON debe ser valido, sin comentarios.',
+            ].join('\n');
+
+            let implResponse;
+            for (let attempt = 0; attempt < 4; attempt++) {
+              implResponse = await fetch(baseUrl + '/chat/completions', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  model: model,
+                  messages: [{ role: 'user', content: implPrompt }],
+                  max_tokens: 8192,
+                }),
+              });
+
+              if (implResponse.ok) break;
+
+              if (implResponse.status !== 429 || attempt === 3) {
+                core.warning('Implementation LLM call failed: ' + implResponse.status);
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: '## ⚠️ Error en implementación\nNo se pudo generar el código automáticamente.\n\nError: LLM API responded with status ' + implResponse.status,
+                });
+                return;
+              }
+
+              await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 5000));
+            }
+
+            const implData = await implResponse.json();
+            const implRaw = implData.choices?.[0]?.message?.content;
+            if (!implRaw) {
+              core.warning('Implementation LLM returned empty');
+              return;
+            }
+
+            let implResult;
+            try {
+              implResult = JSON.parse(implRaw);
+            } catch (e) {
+              const match = implRaw.match(/\{[\s\S]*\}/);
+              if (match) {
+                implResult = JSON.parse(match[0]);
+              } else {
+                core.warning('Could not parse implementation response');
+                return;
+              }
+            }
+
+            if (implResult.impossible) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: '## ⚠️ No se pudo implementar automáticamente\n\n' + (implResult.reason || 'El cambio requiere análisis manual.'),
+              });
+              return;
+            }
+
+            if (!implResult.files || Object.keys(implResult.files).length === 0) {
+              core.warning('No files to change');
+              return;
+            }
+
+            // Create blobs for each changed file
+            const blobs = await Promise.all(
+              Object.entries(implResult.files).map(async ([path, content]) => {
+                const { data } = await github.rest.git.createBlob({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  content: content,
+                  encoding: 'utf-8',
+                });
+                return { path, sha: data.sha, mode: '100644' };
+              })
+            );
+
+            // Get default branch info
+            const { data: repo } = await github.rest.repos.get(context.repo);
+            const defaultBranch = repo.default_branch;
+            const { data: ref } = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'heads/' + defaultBranch,
+            });
+            const { data: baseCommit } = await github.rest.git.getCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: ref.object.sha,
+            });
+
+            // Create a tree with the changes on top of the base
+            const { data: newTree } = await github.rest.git.createTree({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              base_tree: baseCommit.tree.sha,
+              tree: blobs,
+            });
+
+            // Commit
+            const { data: newCommit } = await github.rest.git.createCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              message: implResult.pr_title || 'Implement ' + issue.title,
+              tree: newTree.sha,
+              parents: [ref.object.sha],
+            });
+
+            // Branch name from issue
+            const branchName = 'ai/issue-' + issue.number + '-' +
+              issue.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').substring(0, 50);
+
+            // Create branch
+            try {
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'refs/heads/' + branchName,
+                sha: newCommit.sha,
+              });
+            } catch (e) {
+              core.warning('Branch creation failed: ' + e.message);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: '## ⚠️ Error al crear PR\nLa rama `' + branchName + '` ya existe. Elimínala o fuerza un nuevo análisis editando el issue.',
+              });
+              return;
+            }
+
+            // Create PR
+            const { data: pull } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: implResult.pr_title || 'Implement ' + issue.title,
+              head: branchName,
+              base: defaultBranch,
+              body: implResult.pr_body || 'Implementación automática de #' + issue.number,
+            });
+
+            // Notify on the issue
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: '## 🚀 PR generado\n\nSe ha creado un pull request con la implementación propuesta:\n\n[' + pull.title + '](' + pull.html_url + ')',
+            });
