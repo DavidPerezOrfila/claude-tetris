@@ -195,6 +195,8 @@ function draw() {
     for (let c = 0; c < COLS; c++)
       drawBlock(ctx, c, r, board[r][c], BLOCK);
 
+  // ponytail: don't draw floating pieces after game over
+  if (gameOver) return;
   // ghost
   const gy = ghostY();
   for (let r = 0; r < current.shape.length; r++)
@@ -222,6 +224,7 @@ function drawNext() {
 function endGame() {
   gameOver = true;
   cancelAnimationFrame(animId);
+  draw(); // redraw only the board without floating pieces
   overlayTitle.textContent = 'GAME OVER';
   overlayScore.textContent = `Puntuación: ${score.toLocaleString()}`;
   overlay.classList.remove('hidden');
