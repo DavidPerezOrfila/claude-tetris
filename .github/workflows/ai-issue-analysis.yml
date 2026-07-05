@@ -403,6 +403,19 @@ jobs:
             }
 
             if (pull) {
+              // Auto-merge (best effort — may fail due to branch protection, pending checks, etc.)
+              try {
+                await github.rest.pulls.merge({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pull.number,
+                  merge_method: 'squash',
+                });
+                core.info('PR #' + pull.number + ' merged automatically');
+              } catch (mergeErr) {
+                core.warning('Auto-merge skipped: ' + mergeErr.message);
+              }
+
               const body = pull.body
                 ? (pull.body.includes('🔄 Actualizado') ? pull.body : pull.body + '\n\n---\n🔄 Actualizado automáticamente con nueva implementación.')
                 : implResult.pr_body || 'Implementación automática de #' + issue.number;
