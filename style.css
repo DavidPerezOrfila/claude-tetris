@@ -127,6 +127,24 @@ body {
   transition: background 0.3s ease, border-color 0.3s ease;
 }
 
+/* ---- Power-up ---- */
+#powerup-section { display: none; }
+
+.powerup-value {
+  font-size: 13px !important;
+  color: #ffcc00 !important;
+  text-shadow: 0 0 8px rgba(255, 204, 0, 0.3);
+}
+
+/* ---- Freeze ---- */
+#freeze-section { display: none; }
+
+.freeze-value {
+  font-size: 13px !important;
+  color: #66bbff !important;
+  text-shadow: 0 0 8px rgba(102, 187, 255, 0.3);
+}
+
 /* ---- Controles ---- */
 .controls ul {
   list-style: none;
