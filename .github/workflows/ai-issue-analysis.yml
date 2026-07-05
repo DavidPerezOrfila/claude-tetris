@@ -62,7 +62,7 @@ jobs:
               'Reglas:',
               '- labels debe contener entre 1 y 3 elementos.',
               '- Usa labels descriptivos (ej: bug, feature, enhancement, refactor, documentation, question, ui, gameplay, performance).',
-              '- diagnosis debe ser un analisis conciso pero completo en espanol.',
+              '- diagnosis debe ser un analisis conciso pero completo en espanol, formateado en Markdown para que GitHub lo renderice correctamente.',
               '- El JSON debe ser valido y no contener comentarios.',
             ];
             const prompt = promptLines.join('\n');
