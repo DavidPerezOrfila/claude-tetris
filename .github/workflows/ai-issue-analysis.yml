@@ -15,7 +15,7 @@ jobs:
   analyze-and-implement:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Analyze and implement issue
         uses: actions/github-script@v8
@@ -26,7 +26,6 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const core = require('@actions/core');
             const issue = context.payload.issue;
 
             const baseUrl = process.env.LLM_BASE_URL;
@@ -223,6 +222,11 @@ jobs:
               }
 
               await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 5000));
+            }
+
+            if (!implResponse || !implResponse.ok) {
+              core.warning('Implementation LLM call failed after retries');
+              return;
             }
 
             const implData = await implResponse.json();
