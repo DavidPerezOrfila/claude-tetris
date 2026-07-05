@@ -52,6 +52,10 @@ jobs:
             const headers = { 'Content-Type': 'application/json' };
             if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
 
+            // Set global fetch timeout — undici's default headersTimeout (~5-10s) aborts before our custom signal fires.
+            // Force a 6-minute window so the NVIDIA API can start streaming without us losing the connection.
+            const globalFetchTimeoutMs = 360000;
+
             // Wrapper: fetch with explicit timeout (Node 20's undici has a tight default headersTimeout)
             async function fetchWithTimeout(url, opts, timeoutMs) {
               const controller = new AbortController();
@@ -72,7 +76,7 @@ jobs:
                   body: JSON.stringify({
                     model, messages: [{ role: 'user', content: prompt }], max_tokens: maxTokens,
                   }),
-                }, 180000);
+                }, globalFetchTimeoutMs);
                 if (resp.ok) return resp;
                 if (resp.status !== 429 || attempt === 3) return resp;
                 await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 5000));
@@ -323,7 +327,7 @@ jobs:
             const branchName = 'ai/issue-' + issue.number + '-' +
               issue.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').substring(0, 50);
 
-            // Create branch
+            // Create or force-update branch
             try {
               await github.rest.git.createRef({
                 owner: context.repo.owner,
@@ -332,30 +336,59 @@ jobs:
                 sha: newCommit.sha,
               });
             } catch (e) {
-              core.warning('Branch creation failed: ' + e.message);
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                body: '## ⚠️ Error al crear PR\nLa rama `' + branchName + '` ya existe. Elimínala o fuerza un nuevo análisis editando el issue.',
-              });
-              return;
+              // Branch already exists — delete it and recreate with new commit
+              if (e.status === 422) {
+                core.info('Branch ' + branchName + ' exists, force-updating...');
+                await github.rest.git.deleteRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: 'heads/' + branchName,
+                });
+                await github.rest.git.createRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: 'refs/heads/' + branchName,
+                  sha: newCommit.sha,
+                });
+              } else {
+                core.warning('Branch creation failed: ' + e.message);
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: '## ⚠️ Error al crear PR\n' + e.message,
+                });
+                return;
+              }
             }
 
-            // Create PR
-            const { data: pull } = await github.rest.pulls.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: implResult.pr_title || 'Implement ' + issue.title,
-              head: branchName,
-              base: defaultBranch,
-              body: implResult.pr_body || 'Implementación automática de #' + issue.number,
-            });
+            // Create PR — catch 403 (repo-level workflow permissions not enabled) and notify
+            let prCreated = false;
+            try {
+              const { data: pull } = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: implResult.pr_title || 'Implement ' + issue.title,
+                head: branchName,
+                base: defaultBranch,
+                body: implResult.pr_body || 'Implementación automática de #' + issue.number,
+              });
+              prCreated = true;
+            } catch (e) {
+              if (e.status === 403) {
+                core.warning('PR creation blocked by repo permissions. Notifying on issue.');
+              } else {
+                throw e; // rethrow non-permission errors
+              }
+            }
 
-            // Notify on the issue
+            const prUrl = prCreated
+              ? pull.html_url
+              : 'N/A (permisos no habilitados)';
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: issue.number,
-              body: '## 🚀 PR generado\n\nSe ha creado un pull request con la implementación propuesta:\n\n[' + pull.title + '](' + pull.html_url + ')',
+              body: '## 🚀 PR generado\n\nSe ha creado un pull request con la implementación propuesta:\n\n[' + (prCreated ? implResult.pr_title || 'Implement' : '⚠️ No se pudo crear') + '](' + prUrl + ')',
             });
