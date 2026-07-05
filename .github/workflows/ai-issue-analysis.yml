@@ -362,10 +362,10 @@ jobs:
               }
             }
 
-            // Create PR — catch 403 (repo-level workflow permissions not enabled) and notify
-            let prCreated = false;
+            // Create or update PR
+            let pull = null;
             try {
-              const { data: pull } = await github.rest.pulls.create({
+              const { data: pr } = await github.rest.pulls.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 title: implResult.pr_title || 'Implement ' + issue.title,
@@ -373,22 +373,50 @@ jobs:
                 base: defaultBranch,
                 body: implResult.pr_body || 'Implementación automática de #' + issue.number,
               });
-              prCreated = true;
+              pull = pr;
             } catch (e) {
-              if (e.status === 403) {
+              if (e.status === 422) {
+                // PR already exists — update it
+                core.info('PR already exists, updating...');
+                const { data: existingPRs } = await github.rest.pulls.list({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  head: context.repo.owner + ':' + branchName,
+                  state: 'open',
+                });
+                const existingPR = existingPRs[0];
+                if (existingPR) {
+                  await github.rest.pulls.update({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: existingPR.number,
+                    title: implResult.pr_title || 'Implement ' + issue.title,
+                    body: implResult.pr_body || 'Implementación automática de #' + issue.number,
+                  });
+                  pull = existingPR;
+                }
+              } else if (e.status === 403) {
                 core.warning('PR creation blocked by repo permissions. Notifying on issue.');
               } else {
-                throw e; // rethrow non-permission errors
+                throw e;
               }
             }
 
-            const prUrl = prCreated
-              ? pull.html_url
-              : 'N/A (permisos no habilitados)';
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue.number,
-              body: '## 🚀 PR generado\n\nSe ha creado un pull request con la implementación propuesta:\n\n[' + (prCreated ? implResult.pr_title || 'Implement' : '⚠️ No se pudo crear') + '](' + prUrl + ')',
-            });
+            if (pull) {
+              const body = pull.body
+                ? (pull.body.includes('🔄 Actualizado') ? pull.body : pull.body + '\n\n---\n🔄 Actualizado automáticamente con nueva implementación.')
+                : implResult.pr_body || 'Implementación automática de #' + issue.number;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: '## 🚀 PR ' + (pull.number ? 'actualizado' : 'generado') + '\n\n[' + (implResult.pr_title || 'Implement #' + issue.number) + '](https://github.com/' + context.repo.owner + '/' + context.repo.repo + '/pull/' + pull.number + ')',
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: '## ⚠️ No se pudo crear/actualizar el PR\nPermisos de Actions insuficientes para crear PRs en este repositorio.',
+              });
+            }
