@@ -412,6 +412,24 @@ jobs:
                   merge_method: 'squash',
                 });
                 core.info('PR #' + pull.number + ' merged automatically');
+                // Close the issue since the PR was merged
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                });
+                // Delete the feature branch
+                try {
+                  await github.rest.git.deleteRef({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ref: 'heads/' + branchName,
+                  });
+                  core.info('Branch ' + branchName + ' deleted');
+                } catch (deleteErr) {
+                  core.warning('Branch deletion skipped: ' + deleteErr.message);
+                }
               } catch (mergeErr) {
                 core.warning('Auto-merge skipped: ' + mergeErr.message);
               }
