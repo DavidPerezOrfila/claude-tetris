@@ -39,6 +39,7 @@ const overlay = document.getElementById('overlay');
 const overlayTitle = document.getElementById('overlay-title');
 const overlayScore = document.getElementById('overlay-score');
 const restartBtn = document.getElementById('restart-btn');
+const themeToggle = document.getElementById('checkbox');
 
 let board, current, next, score, lines, level, paused, gameOver, lastTime, dropAccum, dropInterval, animId;
 
@@ -169,7 +170,7 @@ function drawBlock(context, x, y, colorIndex, size, alpha) {
 }
 
 function drawGrid() {
-  ctx.strokeStyle = '#22222e';
+  ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--grid-line');
   ctx.lineWidth = 0.5;
   for (let c = 1; c < COLS; c++) {
     ctx.beginPath();
@@ -272,6 +273,19 @@ function init() {
   overlay.classList.add('hidden');
   cancelAnimationFrame(animId);
   animId = requestAnimationFrame(loop);
+  draw(); // Force redraw for theme consistency
+  drawNext();
+}
+
+function toggleTheme(e) {
+  if (e.target.checked) {
+    document.body.setAttribute('data-theme', 'light');
+  } else {
+    document.body.removeAttribute('data-theme');
+  }
+  // Redraw to update grid colors
+  draw();
+  drawNext();
 }
 
 document.addEventListener('keydown', e => {
@@ -300,6 +314,7 @@ document.addEventListener('keydown', e => {
 });
 
 restartBtn.addEventListener('click', init);
+themeToggle.addEventListener('change', toggleTheme);
 
 init();
 
