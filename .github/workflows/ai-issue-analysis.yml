@@ -3,6 +3,8 @@ name: AI Issue Analysis
 on:
   issues:
     types: [opened, edited]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
@@ -46,126 +48,112 @@ jobs:
             core.info('LLM endpoint: ' + baseUrl + '/chat/completions');
             core.info('LLM model:    ' + model);
 
-            // === ANALYSIS PHASE ===
-
-            // Fetch existing repo labels
-            const { data: repoLabels } = await github.rest.issues.listLabelsForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-            });
-            const labelNames = new Set(repoLabels.map(l => l.name));
-
-            const promptLines = [
-              'Analiza el siguiente issue de GitHub y responde UNICAMENTE con un JSON valido.',
-              '',
-              'Titulo: ' + issue.title,
-              'Cuerpo: ' + (issue.body || 'Sin descripcion'),
-              '',
-              'Formato requerido (no incluyas markdown, solo JSON puro):',
-              '{"labels": ["label1", "label2"], "diagnosis": "Analisis detallado..."}',
-              '',
-              'Reglas:',
-              '- labels debe contener entre 1 y 3 elementos.',
-              '- Usa labels descriptivos (ej: bug, feature, enhancement, refactor, documentation, question, ui, gameplay, performance).',
-              '- diagnosis debe ser un analisis conciso pero completo en espanol, formateado en Markdown para que GitHub lo renderice correctamente.',
-              '- El JSON debe ser valido y no contener comentarios.',
-            ];
-            const prompt = promptLines.join('\n');
-
+            const isCommentEvent = context.payload.comment !== undefined;
             const headers = { 'Content-Type': 'application/json' };
-            if (apiKey) {
-              headers['Authorization'] = 'Bearer ' + apiKey;
+            if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+
+            // Helper: call LLM with retry
+            async function callLLM(prompt, maxTokens) {
+              for (let attempt = 0; attempt < 4; attempt++) {
+                const resp = await fetch(baseUrl + '/chat/completions', {
+                  method: 'POST',
+                  headers,
+                  body: JSON.stringify({
+                    model, messages: [{ role: 'user', content: prompt }], max_tokens: maxTokens,
+                  }),
+                });
+                if (resp.ok) return resp;
+                if (resp.status !== 429 || attempt === 3) return resp;
+                await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 5000));
+              }
+              return null;
             }
 
-            // Call LLM
-            let response;
-            for (let attempt = 0; attempt < 4; attempt++) {
-              response = await fetch(baseUrl + '/chat/completions', {
-                method: 'POST',
-                headers,
-                body: JSON.stringify({
-                  model: model,
-                  messages: [{ role: 'user', content: prompt }],
-                  max_tokens: 2048,
-                }),
+            // Helper: parse JSON from LLM response
+            async function parseLLMResponse(response, label) {
+              if (!response || !response.ok) {
+                const status = response ? response.status : 'no response';
+                if (label === 'analysis') core.setFailed(label + ' LLM error: ' + status);
+                else core.warning(label + ' LLM error: ' + status);
+                return null;
+              }
+              const data = await response.json();
+              const raw = data.choices?.[0]?.message?.content;
+              if (!raw) { core.warning(label + ' returned empty'); return null; }
+              try { return JSON.parse(raw); }
+              catch (e) {
+                const m = raw.match(/\{[\s\S]*\}/);
+                if (m) return JSON.parse(m[0]);
+                core.warning(label + ' unparseable: ' + raw.substring(0, 100));
+                return null;
+              }
+            }
+
+            // === ANALYSIS PHASE (issue events only, not comments) ===
+            if (!isCommentEvent) {
+              const { data: repoLabels } = await github.rest.issues.listLabelsForRepo({
+                owner: context.repo.owner, repo: context.repo.repo,
               });
+              const labelNames = new Set(repoLabels.map(l => l.name));
 
-              if (response.ok) break;
+              const analysis = await parseLLMResponse(await callLLM([
+                'Analiza el siguiente issue de GitHub y responde UNICAMENTE con un JSON valido.',
+                '',
+                'Titulo: ' + issue.title,
+                'Cuerpo: ' + (issue.body || 'Sin descripcion'),
+                '',
+                'Formato requerido (no incluyas markdown, solo JSON puro):',
+                '{"labels": ["label1", "label2"], "diagnosis": "Analisis detallado..."}',
+                '',
+                'Reglas:',
+                '- labels debe contener entre 1 y 3 elementos.',
+                '- Usa labels descriptivos (ej: bug, feature, enhancement, refactor, documentation, question, ui, gameplay, performance).',
+                '- diagnosis debe ser un analisis conciso pero completo en espanol, formateado en Markdown.',
+                '- El JSON debe ser valido y no contener comentarios.',
+              ].join('\n'), 2048), 'analysis');
 
-              if (response.status !== 429 || attempt === 3) {
-                const errText = await response.text();
-                core.setFailed('LLM API error: ' + response.status + ' ' + errText);
-                return;
-              }
-
-              const delay = Math.pow(2, attempt) * 5000;
-              core.info('Rate limited (429), retrying in ' + (delay / 1000) + 's...');
-              await new Promise(r => setTimeout(r, delay));
-            }
-
-            const data = await response.json();
-            const rawText = data.choices?.[0]?.message?.content;
-            if (!rawText) {
-              core.setFailed('LLM API returned empty content.');
-              return;
-            }
-
-            let result;
-            try {
-              result = JSON.parse(rawText);
-            } catch (e) {
-              const match = rawText.match(/\{[\s\S]*\}/);
-              if (match) {
-                result = JSON.parse(match[0]);
-              } else {
-                core.setFailed('No se pudo parsear la respuesta del LLM: ' + rawText);
-                return;
-              }
-            }
-
-            const labelsToApply = Array.isArray(result.labels)
-              ? result.labels.filter(l => typeof l === 'string')
-              : [];
-
-            for (const label of labelsToApply) {
-              if (!labelNames.has(label)) {
-                try {
-                  await github.rest.issues.createLabel({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    name: label,
-                    color: 'ededed',
+              if (analysis) {
+                const labelsToApply = Array.isArray(analysis.labels)
+                  ? analysis.labels.filter(l => typeof l === 'string') : [];
+                for (const label of labelsToApply) {
+                  if (!labelNames.has(label)) {
+                    try {
+                      await github.rest.issues.createLabel({
+                        owner: context.repo.owner, repo: context.repo.repo, name: label, color: 'ededed',
+                      });
+                      labelNames.add(label);
+                    } catch (e) { core.warning('Could not create label ' + label + ': ' + e.message); }
+                  }
+                }
+                if (labelsToApply.length > 0) {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number, labels: labelsToApply,
                   });
-                  labelNames.add(label);
-                } catch (e) {
-                  core.warning('Could not create label ' + label + ': ' + e.message);
+                }
+                if (analysis.diagnosis) {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
+                    body: '## \u{1F916} Diagnóstico de IA\n\n' + analysis.diagnosis,
+                  });
                 }
               }
             }
 
-            if (labelsToApply.length > 0) {
-              await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                labels: labelsToApply,
-              });
-            }
-
-            if (result.diagnosis) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                body: '## \u{1F916} Diagnóstico de IA\n\n' + result.diagnosis,
-              });
-            }
-
-            // === IMPLEMENTATION PHASE (only on opened, not edited) ===
-            if (context.payload.action !== 'opened') {
-              core.info('Skipping implementation for ' + context.payload.action + ' event');
+            // === IMPLEMENTATION PHASE ===
+            // Triggered by: opened issues, OR comments (unless the comment is from the bot itself)
+            if (context.payload.action === 'edited') {
+              core.info('Skipping implementation for edited issue');
               return;
             }
+            if (isCommentEvent && context.payload.comment.user.type === 'Bot') {
+              core.info('Skipping implementation on bot comment');
+              return;
+            }
+
+            // Build implementation context: issue + comment if applicable
+            const implContext = isCommentEvent
+              ? 'Issue #' + issue.number + ': ' + issue.title + '\n\n' + issue.body + '\n\n---\n\nEl usuario ha comentado:\n\n' + context.payload.comment.body
+              : 'Issue #' + issue.number + ': ' + issue.title + '\n\n' + issue.body;
 
             // Read current source files for context
             const sourceFiles = {};
@@ -182,9 +170,7 @@ jobs:
               'Eres un desarrollador senior implementando un issue de GitHub.',
               'El proyecto es Tetris en JavaScript vanilla, HTML5 Canvas y CSS.',
               '',
-              'Issue #' + issue.number + ': ' + issue.title,
-              '',
-              issue.body || 'Sin descripcion',
+              implContext,
               '',
               '=== Codigo fuente actual ===',
               '',
