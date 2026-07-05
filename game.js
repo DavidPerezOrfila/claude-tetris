@@ -11,7 +11,7 @@ const COLORS = [
   '#ba68c8', // T - purple
   '#81c784', // S - green
   '#e57373', // Z - red
-  '#90caf9', // J - light blue
+  '#90CAF9', // J - pale blue (fix #3)
   '#ffb74d', // L - orange
 ];
 
